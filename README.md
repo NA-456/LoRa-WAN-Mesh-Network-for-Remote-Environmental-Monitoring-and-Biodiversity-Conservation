@@ -31,3 +31,13 @@ To compile and run this simulation locally, you need an operational Linux enviro
 1. **Clone the repository into your ns-3 `scratch` workspace:**
    ```bash
    git clone https://github.com/NA-456/LoRa-WAN-Mesh-Network-for-Remote-Environmental-Monitoring-and-Biodiversity-Conservation.git
+
+---
+
+## 📊 Core Objectives & Evaluations
+
+This simulation evaluates the performance boundaries of the multi-hop network using the following key technical metrics:
+
+* **Packet Delivery Ratio (PDR):** Benchmarking delivery success rates across varied hop counts from the furthest node (`10.1.1.5`) to the gateway (`10.1.1.1`).
+* **Path Loss Validation:** Modeling link budget attenuation and receiver sensitivity thresholds over 30-meter node intervals.
+* **Latency & Overhead:** Measuring the network stack alignment cost of running IPv6/6LoWPAN headers on top of low-throughput LoRa configurations.
