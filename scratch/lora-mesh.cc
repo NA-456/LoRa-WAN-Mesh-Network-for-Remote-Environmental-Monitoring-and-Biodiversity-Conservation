@@ -1,13 +1,17 @@
+cat << 'EOF' > scratch/lora-mesh.cc
 #include "ns3/core-module.h"
 #include "ns3/network-module.h"
 #include "ns3/mobility-module.h"
 #include "ns3/lr-wpan-module.h"
+#include "ns3/spectrum-module.h"
+#include "ns3/propagation-module.h"
 #include <set>
 #include <vector>
 #include <cmath>
 #include <iostream>
 
 using namespace ns3;
+using namespace ns3::lrwpan;
 
 NS_LOG_COMPONENT_DEFINE ("LoRaMeshEvaluation");
 
@@ -15,13 +19,13 @@ NS_LOG_COMPONENT_DEFINE ("LoRaMeshEvaluation");
 uint32_t g_txPackets = 0;
 uint32_t g_rxPackets = 0;
 Time g_totalDelay = Seconds (0.0);
-double g_nodeDistance = 30.0;
+double g_nodeDistance = 200.0;
 std::string g_runMode = "mesh"; // "mesh" or "star"
-bool g_enableFailure = false;   // Mid-run relay failure test
+bool g_enableFailure = false;
 
 NetDeviceContainer g_lrWpanDevices;
 std::set<uint32_t> g_gatewaySeenPackets;
-std::set<std::pair<uint32_t, uint32_t>> g_relaySeenPackets; // pair<nodeId, seqNum>
+std::set<std::pair<uint32_t, uint32_t>> g_relaySeenPackets;
 
 // Custom timestamp & sequence tracking tag
 class EvaluationTag : public Tag
@@ -35,7 +39,7 @@ public:
   }
   virtual TypeId GetInstanceTypeId (void) const { return GetTypeId (); }
   virtual uint32_t GetSerializedSize (void) const { return sizeof (uint64_t) + sizeof (uint32_t); }
-  
+
   virtual void Serialize (TagBuffer i) const { 
     i.WriteU64 (m_timestamp); 
     i.WriteU32 (m_seqNum);
@@ -64,7 +68,7 @@ double CalculateLoRaToA (uint32_t payloadBytes, uint32_t sf, double bwHz = 12500
 {
   double tSym = std::pow (2.0, (double)sf) / bwHz;
   double tPreamble = (8.0 + 4.25) * tSym;
-  double de = (sf >= 11) ? 1.0 : 0.0; // Low data rate optimization
+  double de = (sf >= 11) ? 1.0 : 0.0;
   double num = 8.0 * payloadBytes - 4.0 * sf + 28.0 + 16.0;
   double den = 4.0 * (sf - 2.0 * de);
   double payloadSymbNb = 8.0 + std::max (std::ceil (num / den) * 5.0, 0.0);
@@ -127,13 +131,13 @@ bool Layer2ReceivePacketSink (Ptr<NetDevice> dev, Ptr<const Packet> packet, uint
       return true;
     }
 
-  // In Baseline STAR Mode, intermediate nodes never relay
+  // Baseline STAR Mode
   if (g_runMode == "star")
     {
       return true;
     }
 
-  // Mid-Run Failure Test: Relay 2 stops forwarding after t = 10.0 s
+  // Mid-Run Failure Test
   if (g_enableFailure && currentNodeId == 2 && Simulator::Now ().GetSeconds () >= 10.0)
     {
       return true;
@@ -148,9 +152,9 @@ bool Layer2ReceivePacketSink (Ptr<NetDevice> dev, Ptr<const Packet> packet, uint
           g_relaySeenPackets.insert (relayKey);
           Ptr<Packet> forwardPacket = packet->Copy ();
 
-          // Forwarding jitter (15ms - 35ms) to prevent wireless collisions
+          // Reviewer Backoff: 150ms - 400ms jitter
           Ptr<UniformRandomVariable> jitter = CreateObject<UniformRandomVariable> ();
-          Time forwardDelay = MilliSeconds (jitter->GetValue (15.0, 35.0));
+          Time forwardDelay = MilliSeconds (jitter->GetValue (150.0, 400.0));
           Simulator::Schedule (forwardDelay, &ForwardPacket, currentNodeId, forwardPacket);
         }
     }
@@ -162,17 +166,17 @@ int main (int argc, char *argv[])
   uint32_t numNodes = 5;
 
   CommandLine cmd (__FILE__);
-  cmd.AddValue ("numNodes", "Number of nodes in the chain (Node 0 is Gateway, Node N-1 is Leaf)", numNodes);
-  cmd.AddValue ("nodeDistance", "Distance between adjacent hops in meters", g_nodeDistance);
+  cmd.AddValue ("numNodes", "Number of nodes in the chain", numNodes);
+  cmd.AddValue ("nodeDistance", "Hop distance in meters", g_nodeDistance);
   cmd.AddValue ("mode", "Network evaluation mode: 'mesh' or 'star'", g_runMode);
-  cmd.AddValue ("enableFailure", "Simulate Node 2 relay failure after t=10s", g_enableFailure);
+  cmd.AddValue ("enableFailure", "Simulate Node 2 relay failure", g_enableFailure);
   cmd.Parse (argc, argv);
 
   // 1. Create Nodes
   NodeContainer meshNodes;
   meshNodes.Create (numNodes);
 
-  // 2. Linear Array Positions
+  // 2. Linear Array Positions (200m hops)
   MobilityHelper mobility;
   Ptr<ListPositionAllocator> positionAlloc = CreateObject<ListPositionAllocator> ();
   for (uint32_t i = 0; i < numNodes; ++i)
@@ -187,7 +191,19 @@ int main (int argc, char *argv[])
   LrWpanHelper lrWpanHelper;
   g_lrWpanDevices = lrWpanHelper.Install (meshNodes);
 
-  // 4. Connect Layer-2 Receive Callbacks across all devices
+  // Calibrate radio sensitivity to LoRa CSS link budget (-125 dBm sensitivity floor)
+  // This allows 200m physical link closure on native ns-3 channel models without crashing
+  for (uint32_t i = 0; i < numNodes; ++i)
+    {
+      Ptr<LrWpanNetDevice> dev = DynamicCast<LrWpanNetDevice> (g_lrWpanDevices.Get (i));
+      if (dev)
+        {
+          // Change energy detection threshold from -106.58 dBm to LoRa sensitivity (-125 dBm)
+          dev->GetPhy ()->SetRxSensitivity (-125.0);
+        }
+    }
+
+  // 4. Connect Layer-2 Receive Callbacks
   for (uint32_t i = 0; i < numNodes; ++i)
     {
       Ptr<NetDevice> dev = g_lrWpanDevices.Get (i);
@@ -197,8 +213,8 @@ int main (int argc, char *argv[])
         }
     }
 
-  // 5. Schedule 8 telemetry alerts (every 2.0s from t = 2.0s to 16.0s) from Leaf Node
-  Simulator::Schedule (Seconds (2.0), &GenerateSensorAlert, numNodes - 1, 8, Seconds (2.0), 1);
+  // 5. Schedule 100 telemetry alerts (every 2.0s) from Leaf Node
+  Simulator::Schedule (Seconds (2.0), &GenerateSensorAlert, numNodes - 1, 100, Seconds (2.0), 1);
 
   std::cout << "\n==========================================================" << std::endl;
   std::cout << "Starting LoRa Mesh Simulation (" << g_runMode << " mode):" << std::endl;
@@ -210,7 +226,7 @@ int main (int argc, char *argv[])
     }
   std::cout << "==========================================================\n" << std::endl;
 
-  Simulator::Stop (Seconds (20.0));
+  Simulator::Stop (Seconds (220.0));
   Simulator::Run ();
 
   // =======================================================================
@@ -224,24 +240,25 @@ int main (int argc, char *argv[])
   std::cout << "\n==========================================================" << std::endl;
   std::cout << "              BIODIVERSITY GRID EVALUATION RESULTS         " << std::endl;
   std::cout << "==========================================================" << std::endl;
-  std::cout << "  Topology Mode:                    " << (g_runMode == "star" ? "STAR (Single-Hop Baseline)" : "MESH (Multi-Hop Layer-2)") << std::endl;
+  std::cout << "  Topology Mode:                     " << (g_runMode == "star" ? "STAR (Single-Hop Baseline)" : "MESH (Multi-Hop Layer-2)") << std::endl;
   std::cout << "  Total Telemetry Alerts Sent (Tx): " << g_txPackets << std::endl;
-  std::cout << "  Alerts Reaching Gateway (Rx):     " << g_rxPackets << std::endl;
-  std::cout << "  Packet Delivery Ratio (PDR):      " << pdr << " %" << std::endl;
+  std::cout << "  Alerts Reaching Gateway (Rx):      " << g_rxPackets << std::endl;
+  std::cout << "  Packet Delivery Ratio (PDR):       " << pdr << " %" << std::endl;
 
   if (g_rxPackets > 0)
     {
       double emulatedDelayMs = (g_totalDelay.GetSeconds () / g_rxPackets) * 1000.0;
-      std::cout << "  Emulated MAC Forwarding Delay:    " << emulatedDelayMs << " ms" << std::endl;
-      std::cout << "  Mapped LoRa Airtime (SF7):        " << (hopCount * singleHopToA_SF7 * 1000.0) << " ms (" << (hopCount * singleHopToA_SF7) << " s)" << std::endl;
-      std::cout << "  Mapped LoRa Airtime (SF12):       " << (hopCount * singleHopToA_SF12 * 1000.0) << " ms (" << (hopCount * singleHopToA_SF12) << " s)" << std::endl;
+      std::cout << "  Emulated MAC Forwarding Delay:     " << emulatedDelayMs << " ms" << std::endl;
+      std::cout << "  Mapped LoRa Airtime (SF7):         " << (hopCount * singleHopToA_SF7 * 1000.0) << " ms (" << (hopCount * singleHopToA_SF7) << " s)" << std::endl;
+      std::cout << "  Mapped LoRa Airtime (SF12):        " << (hopCount * singleHopToA_SF12 * 1000.0) << " ms (" << (hopCount * singleHopToA_SF12) << " s)" << std::endl;
     }
   else
     {
-      std::cout << "  Link Status:                      DROPPED (Signal below receiver sensitivity threshold)" << std::endl;
+      std::cout << "  Link Status:                       DROPPED (Signal below receiver sensitivity threshold)" << std::endl;
     }
   std::cout << "==========================================================\n" << std::endl;
 
   Simulator::Destroy ();
   return 0;
 }
+EOF
