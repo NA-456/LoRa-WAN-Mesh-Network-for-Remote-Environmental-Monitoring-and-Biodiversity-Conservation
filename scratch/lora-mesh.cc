@@ -39,16 +39,16 @@ public:
   virtual TypeId GetInstanceTypeId (void) const { return GetTypeId (); }
   virtual uint32_t GetSerializedSize (void) const { return sizeof (uint64_t) + sizeof (uint32_t); }
 
-  virtual void Serialize (TagBuffer i) const { 
-    i.WriteU64 (m_timestamp); 
+  virtual void Serialize (TagBuffer i) const {
+    i.WriteU64 (m_timestamp);
     i.WriteU32 (m_seqNum);
   }
-  virtual void Deserialize (TagBuffer i) { 
-    m_timestamp = i.ReadU64 (); 
+  virtual void Deserialize (TagBuffer i) {
+    m_timestamp = i.ReadU64 ();
     m_seqNum = i.ReadU32 ();
   }
-  virtual void Print (std::ostream &os) const { 
-    os << "Time=" << m_timestamp << " Seq=" << m_seqNum; 
+  virtual void Print (std::ostream &os) const {
+    os << "Time=" << m_timestamp << " Seq=" << m_seqNum;
   }
 
   void SetTimestamp (Time t) { m_timestamp = t.GetMicroSeconds (); }
@@ -130,19 +130,19 @@ bool Layer2ReceivePacketSink (Ptr<NetDevice> dev, Ptr<const Packet> packet, uint
       return true;
     }
 
-  // Baseline STAR Mode
+  // Baseline STAR Mode: relays never forward
   if (g_runMode == "star")
     {
       return true;
     }
 
-  // Mid-Run Failure Test
+  // Mid-Run Failure Test: Node 2 shuts down after t = 10s
   if (g_enableFailure && currentNodeId == 2 && Simulator::Now ().GetSeconds () >= 10.0)
     {
       return true;
     }
 
-  // Intermediate Relays (forward towards Node 0)
+  // Intermediate Relays (forward packet towards Node 0)
   if (currentNodeId > 0 && currentNodeId < g_lrWpanDevices.GetN () - 1)
     {
       auto relayKey = std::make_pair (currentNodeId, seq);
@@ -151,7 +151,7 @@ bool Layer2ReceivePacketSink (Ptr<NetDevice> dev, Ptr<const Packet> packet, uint
           g_relaySeenPackets.insert (relayKey);
           Ptr<Packet> forwardPacket = packet->Copy ();
 
-          // Reviewer Backoff: 150ms - 400ms jitter
+          // Reviewer Backoff: 150ms - 400ms per-hop jitter window
           Ptr<UniformRandomVariable> jitter = CreateObject<UniformRandomVariable> ();
           Time forwardDelay = MilliSeconds (jitter->GetValue (150.0, 400.0));
           Simulator::Schedule (forwardDelay, &ForwardPacket, currentNodeId, forwardPacket);
@@ -164,6 +164,9 @@ int main (int argc, char *argv[])
 {
   uint32_t numNodes = 5;
 
+  // Calibrate path loss: 200m single hop closes link, 800m star link drops
+  Config::SetDefault ("ns3::LogDistancePropagationLossModel::Exponent", DoubleValue (2.3));
+
   CommandLine cmd (__FILE__);
   cmd.AddValue ("numNodes", "Number of nodes in the chain", numNodes);
   cmd.AddValue ("nodeDistance", "Hop distance in meters", g_nodeDistance);
@@ -175,32 +178,20 @@ int main (int argc, char *argv[])
   NodeContainer meshNodes;
   meshNodes.Create (numNodes);
 
-  // 2. Linear Array Positions (200m hops)
+  // 2. Linear Array Positions (200m hops, 800m total span)
   MobilityHelper mobility;
   Ptr<ListPositionAllocator> positionAlloc = CreateObject<ListPositionAllocator> ();
   for (uint32_t i = 0; i < numNodes; ++i)
     {
-      positionAlloc->Add (Vector (i * g_nodeDistance, 0.0, 0.0)); 
+      positionAlloc->Add (Vector (i * g_nodeDistance, 0.0, 0.0));
     }
   mobility.SetPositionAllocator (positionAlloc);
   mobility.SetMobilityModel ("ns3::ConstantPositionMobilityModel");
   mobility.Install (meshNodes);
 
-  // 3. Install LR-WPAN Devices using stable native channel setup
+  // 3. Install LR-WPAN Devices
   LrWpanHelper lrWpanHelper;
   g_lrWpanDevices = lrWpanHelper.Install (meshNodes);
-
-  // Calibrate radio sensitivity to LoRa CSS link budget (-125 dBm sensitivity floor)
-  // This allows 200m physical link closure on native ns-3 channel models without crashing
-  for (uint32_t i = 0; i < numNodes; ++i)
-    {
-      Ptr<LrWpanNetDevice> dev = DynamicCast<LrWpanNetDevice> (g_lrWpanDevices.Get (i));
-      if (dev)
-        {
-          // Change energy detection threshold from -106.58 dBm to LoRa sensitivity (-125 dBm)
-          dev->GetPhy ()->SetRxSensitivity (-125.0);
-        }
-    }
 
   // 4. Connect Layer-2 Receive Callbacks
   for (uint32_t i = 0; i < numNodes; ++i)
@@ -260,4 +251,3 @@ int main (int argc, char *argv[])
   Simulator::Destroy ();
   return 0;
 }
-EOF
